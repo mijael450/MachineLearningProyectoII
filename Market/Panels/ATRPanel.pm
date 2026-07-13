@@ -16,7 +16,8 @@ sub draw {
     my $scale_w = $state->{scale_w};
 
     my ($min, $max);
-    if ((!$state->{auto_y} || $state->{lock_y}) && defined $state->{atr_min} && defined $state->{atr_max}) {
+    my $atr_auto = exists $state->{auto_atr} ? $state->{auto_atr} : $state->{auto_y};
+    if ((!$atr_auto || $state->{lock_y}) && defined $state->{atr_min} && defined $state->{atr_max}) {
         $min = $state->{atr_min};
         $max = $state->{atr_max};
     } else {

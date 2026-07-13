@@ -23,7 +23,7 @@ sub new {
         mw => $args{mw}, canvas => undef,
         tf => 1, visible => 160, first => 0,
         left => 4, scale_w => 92, bottom_h => 30,
-        atr_h => 170, vol_h => 82, auto_y => 1,
+        atr_h => 170, vol_h => 82, auto_y => 1, auto_atr => 1,
         lock_y_on_zoom => 0,
         price_min => 0, price_max => 1,
         locked_index => undef, mouse_index => undef,
@@ -90,6 +90,82 @@ sub run {
 
     my $top = $mw->Frame(-background => '#1e222d', -relief => 'flat')->pack(-side => 'top', -fill => 'x');
 
+    # ── Botones Zoom [+][-] ──────────────────────────────────────────────────
+    $top->Label(-text => 'Zoom', -foreground => '#b2b5be', -background => '#1e222d',
+        -font => ['Arial', 9], -padx => 4, -pady => 5)->pack(-side => 'left');
+    $top->Button(
+        -text => '+', -relief => 'flat', -borderwidth => 0, -padx => 8, -pady => 5,
+        -font => ['Arial', 9, 'bold'], -foreground => '#b2b5be', -background => '#1e222d',
+        -activeforeground => '#ffffff', -activebackground => '#2a2e39', -cursor => 'hand2',
+        -command => sub { $self->mouse_wheel(120); },
+    )->pack(-side => 'left', -padx => 1);
+    $top->Button(
+        -text => '-', -relief => 'flat', -borderwidth => 0, -padx => 8, -pady => 5,
+        -font => ['Arial', 9, 'bold'], -foreground => '#b2b5be', -background => '#1e222d',
+        -activeforeground => '#ffffff', -activebackground => '#2a2e39', -cursor => 'hand2',
+        -command => sub { $self->mouse_wheel(-120); },
+    )->pack(-side => 'left', -padx => 1);
+
+    # Separador
+    $top->Label(-text => '|', -foreground => '#363a45', -background => '#1e222d',
+        -font => ['Arial', 11], -padx => 4)->pack(-side => 'left');
+
+    # ── Botones P:Auto y ATR:Auto ────────────────────────────────────────────
+    my $mode_btn = $top->Button(
+        -text             => 'P:Auto',
+        -relief           => 'flat',
+        -borderwidth      => 0,
+        -padx             => 10,
+        -pady             => 5,
+        -font             => ['Arial', 9, 'bold'],
+        -foreground       => '#089981',
+        -background       => '#1e222d',
+        -activeforeground => '#ffffff',
+        -activebackground => '#2a2e39',
+        -cursor           => 'hand2',
+    );
+    $mode_btn->configure(-command => sub {
+        $self->{auto_y} = $self->{auto_y} ? 0 : 1;
+        $self->{lock_y_on_zoom} = 0;
+        if ($self->{auto_y}) {
+            $mode_btn->configure(-text => 'P:Auto', -foreground => '#089981');
+        } else {
+            $mode_btn->configure(-text => 'P:Manual', -foreground => '#ef5350');
+        }
+        $self->draw;
+    });
+    $mode_btn->pack(-side => 'left', -padx => 4, -pady => 2);
+
+    my $mode_btn_atr = $top->Button(
+        -text             => 'ATR:Auto',
+        -relief           => 'flat',
+        -borderwidth      => 0,
+        -padx             => 10,
+        -pady             => 5,
+        -font             => ['Arial', 9, 'bold'],
+        -foreground       => '#089981',
+        -background       => '#1e222d',
+        -activeforeground => '#ffffff',
+        -activebackground => '#2a2e39',
+        -cursor           => 'hand2',
+    );
+    $mode_btn_atr->configure(-command => sub {
+        $self->{auto_atr} = $self->{auto_atr} ? 0 : 1;
+        $self->{lock_y_on_zoom} = 0;
+        if ($self->{auto_atr}) {
+            $mode_btn_atr->configure(-text => 'ATR:Auto', -foreground => '#089981');
+            delete $self->{atr_min}; delete $self->{atr_max};
+        } else {
+            $mode_btn_atr->configure(-text => 'ATR:Manual', -foreground => '#ef5350');
+        }
+        $self->draw;
+    });
+    $mode_btn_atr->pack(-side => 'left', -padx => 4, -pady => 2);
+
+    # Separador
+    $top->Label(-text => '|', -foreground => '#363a45', -background => '#1e222d',
+        -font => ['Arial', 11], -padx => 4)->pack(-side => 'left');
+
     # Mapa de TF → etiqueta visible en el menú
     my %TF_LABEL = (
         1   => '1m',  5   => '5m',  15  => '15m',
@@ -99,8 +175,6 @@ sub run {
     my @TF_ORDER = (1, 5, 15, 60, 120, 240, 'D', 'W');
 
     # ── Selector de temporalidad — fila de botones inline ────────────────────
-    # FIX WSL/WSLg: los Menu popup de Tk no se renderizan (aparecen como una
-    # ventana vacía). Usamos botones siempre visibles, sin ventana emergente.
     my %tf_btns;
     my $_refresh_tf_btns = sub {
         my ($active_tf) = @_;
@@ -133,69 +207,22 @@ sub run {
         $b->configure(-command => sub {
             $self->set_timeframe($tf_copy);
             $_refresh_tf_btns->($tf_copy);
+            $mode_btn->configure(-text => 'P:Auto', -foreground => '#089981');
+            $mode_btn_atr->configure(-text => 'ATR:Auto', -foreground => '#089981');
         });
         $b->pack(-side => 'left', -padx => 1);
         $tf_btns{$tf} = $b;
     }
     $_refresh_tf_btns->($self->{tf});
 
-
-    # Separador visual entre selector TF y botón de escala
-    $top->Label(
-        -text       => '|',
-        -foreground => '#363a45',
-        -background => '#1e222d',
-        -font       => ['Arial', 11],
-        -padx       => 4,
-    )->pack(-side => 'left');
-
-    my $scale_btn = $top->Button(
-        -text             => '~ Escala Auto',
-        -relief           => 'flat',
-        -borderwidth      => 0,
-        -padx             => 10,
-        -pady             => 5,
-        -font             => ['Arial', 9, 'bold'],
-        -foreground       => '#ffffff',
-        -background       => '#089981',
-        -activeforeground => '#ffffff',
-        -activebackground => '#067a68',
-        -cursor           => 'hand2',
-    );
-    $scale_btn->configure(-command => sub {
-        $self->{auto_y} = $self->{auto_y} ? 0 : 1;  # lógica intacta
-        $self->{lock_y_on_zoom} = 0;                  # lógica intacta
-        if ($self->{auto_y}) {
-            $scale_btn->configure(
-                -text             => '~ Escala Auto',
-                -background       => '#089981',
-                -activebackground => '#067a68',
-            );
-        } else {
-            $scale_btn->configure(
-                -text             => '= Escala Fija',
-                -background       => '#c0392b',
-                -activebackground => '#a93226',
-            );
-        }
-        $self->draw;  # lógica intacta
-    });
-    $scale_btn->pack(-side => 'left', -padx => 6);
-
-    # ── Overlays — panel Toplevel (FIX WSL/WSLg) ─────────────────────────────
-    # En vez de un Menu emergente (que WSLg no dibuja), usamos una ventana
-    # Toplevel REAL con checkbuttons. WSLg sí renderiza ventanas normales, igual
-    # que la ventana principal. Se crea oculta y el botón la muestra/oculta.
-    # PDF 4.5: activación/desactivación individual de cada overlay.
-    $top->Label(-text => '|', -foreground => '#363a45', -background => '#1e222d',
-                -font => ['Arial', 11], -padx => 4)->pack(-side => 'left');
-
+    # ── Variables de estado para overlays ─────────────────────────────────────
     my %smc_var = (
         swings => 0, bos => 0, choch => 0, fvg => 0, fib => 0,
         ob => 0, sr => 0, trend => 0,
     );
+    my $smc_master = 0;
     my %smc_menu_label = (
-        swings => 'HH / HL / LH / LL',
+        swings => 'Estructura (HH/HL/LH/LL)',
         bos    => 'BOS',
         choch  => 'CHoCH',
         fvg    => 'FVG',
@@ -205,128 +232,56 @@ sub run {
         trend  => 'Trendlines / Channels',
     );
     my @smc_order = qw(swings bos choch fvg fib ob sr trend);
+    my $refresh_smc = sub {
+        for my $k (@smc_order) { $self->{smc_overlay}->set_visible($k, $smc_var{$k}); }
+        $self->draw();
+    };
+    my $sync_smc_master = sub {
+        my $all = 1; $all &&= $smc_var{$_} for @smc_order;
+        $smc_master = $all ? 1 : 0;
+    };
+    my $leaf_smc = sub { $refresh_smc->(); $sync_smc_master->(); };
 
     my %liq_var = (
         bsl => 0, ssl => 0, eqh => 0, eql => 0, sweep => 0, grab => 0, run => 0,
     );
+    my $liq_master = 0;
     my %liq_menu_label = (
-        bsl   => 'BSL',
-        ssl   => 'SSL',
-        eqh   => 'EQH',
-        eql   => 'EQL',
-        sweep => 'Sweep',
-        grab  => 'Liquidity Grab',
-        run   => 'Liquidity Run',
+        bsl    => 'BSL - Buy Side',
+        ssl    => 'SSL - Sell Side',
+        eqh    => 'EQH',
+        eql    => 'EQL',
+        sweep  => 'Sweeps',
+        grab   => 'Grabs',
+        run    => 'Runs',
     );
     my @liq_order = qw(bsl ssl eqh eql sweep grab run);
+    my $refresh_liq = sub {
+        for my $k (@liq_order) { $self->{liq_overlay}->set_visible($k, $liq_var{$k}); }
+        $self->draw();
+    };
+    my $sync_liq_master = sub {
+        my $all = 1; $all &&= $liq_var{$_} for @liq_order;
+        $liq_master = $all ? 1 : 0;
+    };
+    my $leaf_liq = sub { $refresh_liq->(); $sync_liq_master->(); };
 
-    # Ventana del panel de overlays (creada oculta)
-    my $ov_win = $mw->Toplevel();
-    $ov_win->title('Overlays');
-    $ov_win->configure(-background => '#1e222d');
-    $ov_win->withdraw();
-    $ov_win->protocol('WM_DELETE_WINDOW', sub { $ov_win->withdraw(); });
-
-    my $smc_box = $ov_win->Frame(-background => '#1e222d')
-        ->pack(-side => 'left', -anchor => 'n', -padx => 8, -pady => 8, -fill => 'y');
-    $smc_box->Label(-text => 'SMC Structures', -background => '#1e222d',
-        -foreground => '#5b9cff', -font => ['Arial', 9, 'bold'])
-        ->pack(-side => 'top', -anchor => 'w', -pady => [0, 4]);
-    my $smc_frame = $smc_box;
-    for my $key (@smc_order) {
-        my $k = $key;
-        $smc_frame->Checkbutton(
-            -text     => $smc_menu_label{$k},
-            -variable => \$smc_var{$k},
-            -onvalue  => 1, -offvalue => 0,
-            -command  => sub {
-                $self->{smc_overlay}->set_visible($k, $smc_var{$k});
-                $self->draw();
-            },
-            -background => '#1e222d', -foreground => '#b2b5be',
-            -activebackground => '#1e222d', -activeforeground => '#ffffff',
-            -selectcolor => '#26a69a', -font => ['Arial', 9], -anchor => 'w',
-        )->pack(-side => 'top', -anchor => 'w', -fill => 'x');
-    }
-
-    my $liq_box = $ov_win->Frame(-background => '#1e222d')
-        ->pack(-side => 'left', -anchor => 'n', -padx => 8, -pady => 8, -fill => 'y');
-    $liq_box->Label(-text => 'Liquidity', -background => '#1e222d',
-        -foreground => '#5b9cff', -font => ['Arial', 9, 'bold'])
-        ->pack(-side => 'top', -anchor => 'w', -pady => [0, 4]);
-    my $liq_frame = $liq_box;
-    for my $key (@liq_order) {
-        my $k = $key;
-        $liq_frame->Checkbutton(
-            -text     => $liq_menu_label{$k},
-            -variable => \$liq_var{$k},
-            -onvalue  => 1, -offvalue => 0,
-            -command  => sub {
-                $self->{liq_overlay}->set_visible($k, $liq_var{$k});
-                $self->draw();
-            },
-            -background => '#1e222d', -foreground => '#b2b5be',
-            -activebackground => '#1e222d', -activeforeground => '#ffffff',
-            -selectcolor => '#26a69a', -font => ['Arial', 9], -anchor => 'w',
-        )->pack(-side => 'top', -anchor => 'w', -fill => 'x');
-    }
-
-
-    # ── ZigZag (dirección interna + externa) ─────────────────────────────
     my %zz_var = (zzmtf => 0, zzvolume => 0);
+    my $zz_master = 0;
     my %zz_menu_label = (
-        zzmtf    => 'ZZMTF (Dir. Interna)',
-        zzvolume => 'ZZ Volume (Dir. Externa)',
+        zzmtf    => 'Interno (30m)',
+        zzvolume => 'Externo (150)',
     );
     my @zz_order = qw(zzmtf zzvolume);
-    my $zz_box = $ov_win->Frame(-background => '#1e222d')
-        ->pack(-side => 'left', -anchor => 'n', -padx => 8, -pady => 8, -fill => 'y');
-    $zz_box->Label(-text => 'ZigZag', -background => '#1e222d',
-        -foreground => '#5b9cff', -font => ['Arial', 9, 'bold'])
-        ->pack(-side => 'top', -anchor => 'w', -pady => [0, 4]);
-    for my $key (@zz_order) {
-        my $k = $key;
-        $zz_box->Checkbutton(
-            -text     => $zz_menu_label{$k},
-            -variable => \$zz_var{$k},
-            -onvalue  => 1, -offvalue => 0,
-            -command  => sub {
-                $self->{zz_overlay}->set_visible($k, $zz_var{$k});
-                $self->draw();
-            },
-            -background => '#1e222d', -foreground => '#b2b5be',
-            -activebackground => '#1e222d', -activeforeground => '#ffffff',
-            -selectcolor => '#26a69a', -font => ['Arial', 9], -anchor => 'w',
-        )->pack(-side => 'top', -anchor => 'w', -fill => 'x');
-    }
-
-    my $overlays_btn = $top->Button(
-        -text             => 'Overlays',
-        -relief           => 'flat',
-        -borderwidth      => 0,
-        -padx             => 12,
-        -pady             => 5,
-        -font             => ['Arial', 9, 'bold'],
-        -foreground       => '#b2b5be',
-        -background       => '#1e222d',
-        -activeforeground => '#ffffff',
-        -activebackground => '#2a2e39',
-        -cursor           => 'hand2',
-    );
-    $overlays_btn->configure(-command => sub {
-        if ($ov_win->state() eq 'withdrawn') {
-            my $x = $overlays_btn->rootx();
-            my $y = $overlays_btn->rooty() + $overlays_btn->height() + 2;
-            $ov_win->geometry("+$x+$y");
-            $ov_win->deiconify();
-            $ov_win->raise();
-        } else {
-            $ov_win->withdraw();
-        }
-    });
-    $overlays_btn->pack(-side => 'left', -padx => 2);
-    $self->{_overlays_btn} = $overlays_btn;
-    $self->{_ov_win} = $ov_win;
+    my $refresh_zz = sub {
+        for my $k (@zz_order) { $self->{zz_overlay}->set_visible($k, $zz_var{$k}); }
+        $self->draw();
+    };
+    my $sync_zz_master = sub {
+        my $all = 1; $all &&= $zz_var{$_} for @zz_order;
+        $zz_master = $all ? 1 : 0;
+    };
+    my $leaf_zz = sub { $refresh_zz->(); $sync_zz_master->(); };
 
 
 
@@ -450,6 +405,107 @@ sub run {
     );
     $replay_btn->pack(-side => 'left', -padx => 2);
     $self->{_replay_btn} = $replay_btn;
+
+    # ── Tools Bar y panel colapsable de Overlays ──────────────────────────────
+    # Panel inline colapsable, exactamente igual a trading_view_clone:
+    # una barra fija con el botón "Overlays [>]" y un panel que se
+    # pack()/packForget() debajo de ella.
+    my $BAR_BG   = '#1e222d';
+    my $PANEL_BG = '#1e222d';
+
+    my $tools_bar = $mw->Frame(-background => $BAR_BG);
+    $tools_bar->Label(-text => 'Herramientas:', -background => $BAR_BG,
+        -foreground => '#b2b5be', -font => ['Arial', 9, 'bold'])
+        ->pack(-side => 'left', -padx => 8, -pady => 3);
+
+    my $tools_panel = $mw->Frame(-background => $PANEL_BG);
+
+    my $panel_shown = 0;
+    my $panel_btn;
+    $panel_btn = $tools_bar->Button(
+        -text => 'Overlays [>]', -foreground => '#2962ff',
+        -background => $BAR_BG, -activebackground => '#2a2e39',
+        -relief => 'flat', -bd => 0, -font => ['Arial', 9, 'bold'],
+        -cursor => 'hand2',
+        -command => sub {
+            $panel_shown = !$panel_shown;
+            if ($panel_shown) {
+                $tools_panel->pack(-side => 'top', -fill => 'x', -before => $tools_bar);
+                $panel_btn->configure(-text => 'Overlays [v]');
+            } else {
+                $tools_panel->packForget;
+                $panel_btn->configure(-text => 'Overlays [>]');
+            }
+        },
+    )->pack(-side => 'left', -padx => 4, -pady => 2);
+    $self->{_overlays_btn} = $panel_btn;
+
+    $tools_bar->Label(-text => 'Clic en cada herramienta para activar/desactivar de forma independiente',
+        -background => $BAR_BG, -foreground => '#787b86', -font => ['Arial', 8])
+        ->pack(-side => 'right', -padx => 10);
+
+    $tools_bar->pack(-side => 'top', -fill => 'x');
+
+    # Helpers de construcción del panel
+    my $make_col = sub {
+        my ($title, $color) = @_;
+        my $col = $tools_panel->Frame(-background => $PANEL_BG);
+        $col->pack(-side => 'left', -anchor => 'n', -padx => 14, -pady => 6);
+        $col->Label(-text => $title, -background => $PANEL_BG, -foreground => $color,
+            -font => ['Arial', 9, 'bold'])->pack(-side => 'top', -anchor => 'w');
+        return $col;
+    };
+    my $make_chk = sub {
+        my ($parent, $text, $varref, $cmd) = @_;
+        my $cb = $parent->Checkbutton(
+            -text => $text, -variable => $varref, -onvalue => 1, -offvalue => 0,
+            -background => $PANEL_BG, -activebackground => $PANEL_BG,
+            -foreground => '#b2b5be', -activeforeground => '#ffffff',
+            -selectcolor => '#26a69a',
+            -font => ['Arial', 8], -anchor => 'w',
+            ( $cmd ? ( -command => $cmd ) : () ),
+        );
+        $cb->pack(-side => 'top', -anchor => 'w', -fill => 'x');
+        return $cb;
+    };
+
+    # ── Columna SMC Structures ─────────────────────────────────────────────
+    my $col_smc = $make_col->('SMC Structures', '#5b9cff');
+    $make_chk->($col_smc, 'Activar SMC', \$smc_master, sub {
+        $smc_var{$_} = $smc_master for @smc_order;
+        $refresh_smc->();
+    });
+    $make_chk->($col_smc, $smc_menu_label{swings}, \$smc_var{swings}, $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{bos},    \$smc_var{bos},    $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{choch},  \$smc_var{choch},  $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{fvg},    \$smc_var{fvg},    $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{fib},    \$smc_var{fib},    $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{ob},     \$smc_var{ob},     $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{sr},     \$smc_var{sr},     $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{trend},  \$smc_var{trend},  $leaf_smc);
+
+    # ── Columna Liquidity ──────────────────────────────────────────────────
+    my $col_liq = $make_col->('Liquidity', '#ef5350');
+    $make_chk->($col_liq, 'Activar Liquidity', \$liq_master, sub {
+        $liq_var{$_} = $liq_master for @liq_order;
+        $refresh_liq->();
+    });
+    $make_chk->($col_liq, $liq_menu_label{bsl},   \$liq_var{bsl},   $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{ssl},   \$liq_var{ssl},   $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{eqh},   \$liq_var{eqh},   $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{eql},   \$liq_var{eql},   $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{sweep}, \$liq_var{sweep}, $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{grab},  \$liq_var{grab},  $leaf_liq);
+    $make_chk->($col_liq, $liq_menu_label{run},   \$liq_var{run},   $leaf_liq);
+
+    # ── Columna ZigZag ─────────────────────────────────────────────────────
+    my $col_zz = $make_col->('ZigZag', '#5b9cff');
+    $make_chk->($col_zz, 'Activar ZigZag', \$zz_master, sub {
+        $zz_var{$_} = $zz_master for @zz_order;
+        $refresh_zz->();
+    });
+    $make_chk->($col_zz, $zz_menu_label{zzmtf},    \$zz_var{zzmtf},    $leaf_zz);
+    $make_chk->($col_zz, $zz_menu_label{zzvolume}, \$zz_var{zzvolume}, $leaf_zz);
 
     my $canvas = $mw->Canvas(-background => '#131722', -highlightthickness => 0)->pack(-fill => 'both', -expand => 1);
 
@@ -764,9 +820,12 @@ sub replay_exit {
     }
     $self->limit_first();
 
-    # Limpiar precio/ATR para que auto-escala recalcule
-    delete $self->{price_min}; delete $self->{price_max};
-    delete $self->{atr_min};   delete $self->{atr_max};
+    if ($self->{auto_y}) {
+        delete $self->{price_min}; delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
+        delete $self->{atr_min};   delete $self->{atr_max};
+    }
 
     $self->draw();
 }
@@ -953,6 +1012,8 @@ sub _replay_center_view {
             $self->limit_first();
             if ($self->{auto_y}) {
                 delete $self->{price_min}; delete $self->{price_max};
+            }
+            if ($self->{auto_atr}) {
                 delete $self->{atr_min};   delete $self->{atr_max};
             }
         }
@@ -965,8 +1026,12 @@ sub _replay_center_view {
     $self->{visible} = $visible;
     $self->{first}   = $cursor - int($visible * 0.80);
     $self->limit_first();
-    delete $self->{price_min}; delete $self->{price_max};
-    delete $self->{atr_min};   delete $self->{atr_max};
+    if ($self->{auto_y}) {
+        delete $self->{price_min}; delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
+        delete $self->{atr_min};   delete $self->{atr_max};
+    }
 }
 
 # Actualiza la etiqueta de información (fecha/hora de la vela actual).
@@ -1181,6 +1246,7 @@ sub draw {
         w => $w, h => $h, left => $self->{left}, right => $right, scale_w => $self->{scale_w},
         top => 0, price_h => $price_h, atr_top => $atr_top, atr_h => $self->{atr_h},
         vol_h => $self->{vol_h}, bar_w => $bar_w, auto_y => $self->{auto_y},
+        auto_atr => $self->{auto_atr},
         lock_y => $self->{lock_y_on_zoom},
         price_min => $self->{price_min}, price_max => $self->{price_max}, tf => $self->{tf},
         atr_min => $self->{atr_min},
@@ -1798,19 +1864,21 @@ sub mouse_drag {
 
         $self->limit_first();
 
-        if ($self->{auto_y}) {
-            $self->{lock_y_on_zoom} = 0;
-            delete $self->{price_min};
-            delete $self->{price_max};
-            delete $self->{atr_min};
-            delete $self->{atr_max};
-        }
-
-        $self->request_draw();
-        return;
+    if ($self->{auto_y}) {
+        $self->{lock_y_on_zoom} = 0;
+        delete $self->{price_min};
+        delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
+        delete $self->{atr_min};
+        delete $self->{atr_max};
     }
 
-    if ($self->{scale_drag}) {
+    $self->request_draw();
+    return;
+}
+
+if ($self->{scale_drag}) {
     my $dy = $y - $self->{scale_drag}{y};
 
     # Arriba: estirar velas/ATR
@@ -1870,17 +1938,15 @@ sub mouse_drag {
         $self->{replay_free_view} = 1 if $self->{replay_mode};
 
             if ($self->{auto_y}) {
-        # Auto vertical activo:
-        # NO tocar Y manualmente.
-        # NO bloquear Y.
-        # El draw recalcula la escala con lo visible.
         $self->{lock_y_on_zoom} = 0;
-
         delete $self->{price_min};
         delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
         delete $self->{atr_min};
         delete $self->{atr_max};
-
+    }
+    if ($self->{auto_y} || $self->{auto_atr}) {
         $self->request_draw();
         return;
     }
@@ -2001,9 +2067,12 @@ sub mouse_wheel {
         $self->{lock_y_on_zoom} = 0;
         delete $self->{price_min};
         delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
         delete $self->{atr_min};
         delete $self->{atr_max};
-    } else {
+    }
+    if (!$self->{auto_y} && !$self->{auto_atr}) {
         $self->{lock_y_on_zoom} = 1;
     }
 
@@ -2046,11 +2115,12 @@ sub go_to_start {
     if ($self->{auto_y}) {
         delete $self->{price_min};
         delete $self->{price_max};
+    }
+    if ($self->{auto_atr}) {
         delete $self->{atr_min};
         delete $self->{atr_max};
-        $self->{lock_y_on_zoom} = 0;
     }
-
+    $self->{lock_y_on_zoom} = 0;
     $self->draw();
 }
 
