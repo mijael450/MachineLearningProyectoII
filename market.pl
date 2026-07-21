@@ -22,7 +22,11 @@ use Market::ChartEngine;
 
 my @csv_files;
 
-if (@ARGV) {
+if (@ARGV && $ARGV[0] eq '--all') {
+    shift @ARGV;
+    @csv_files = grep { -f $_ } map { "$FindBin::Bin/$_" }
+        qw(2026_04.csv 2026_05.csv 2026_06_29.csv);
+} elsif (@ARGV) {
     # Modo explícito: el usuario pasa los archivos que quiere
     @csv_files = map { -f $_ ? $_ : "$FindBin::Bin/$_" } @ARGV;
 } else {
@@ -31,16 +35,20 @@ if (@ARGV) {
         "$FindBin::Bin/2026_04.csv",
         "$FindBin::Bin/2026_05.csv",
         "$FindBin::Bin/2026_06_29.csv",
-        # Fallback al nombre original del proyecto anterior
-        "$FindBin::Bin/2026_03.csv",
     );
-    for my $f (@candidates) {
-        push @csv_files, $f if -f $f;
+    # Arranque rápido: usar únicamente el archivo más reciente. Para cargar
+    # los tres meses explícitamente se conserva `perl market.pl --all`.
+    for my $f (reverse @candidates) {
+        if (-f $f) { push @csv_files, $f; last; }
     }
-    # Desduplicar: si solo existe 2026_03.csv (el que era abril renombrado), usarlo
+    # 2026_03.csv es exclusivamente un fallback; contiene datos solapados con
+    # 2026_04.csv y cargar ambos duplicaba timestamps y volumen.
     if (!@csv_files) {
-        die "No se encontraron archivos CSV.\n"
-          . "Uso: perl market.pl [archivo1.csv archivo2.csv ...]\n";
+        my $fallback = "$FindBin::Bin/2026_03.csv";
+        push @csv_files, $fallback if -f $fallback;
+    }
+    if (!@csv_files) {
+        die "No se encontraron archivos CSV.\nUso: perl market.pl [archivo1.csv ...]\n";
     }
 }
 

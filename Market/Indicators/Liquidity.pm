@@ -1,6 +1,8 @@
 package Market::Indicators::Liquidity;
 use strict;
 use warnings;
+use Market::Algorithms::MainSMC;
+use Market::Algorithms::MainLiquidity;
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Market::Indicators::Liquidity
@@ -187,22 +189,43 @@ sub levels_in_range_by_kind {
 # ─────────────────────────────────────────────────────────────────────────────
 sub calculate_all {
     my ($self, $market_data) = @_;
+    $self->_calculate_main_algorithms($market_data);
+}
+
+sub _calculate_main_algorithms {
+    my ($self, $market_data) = @_;
     $self->reset();
-
+    my $base = (ref($market_data) && $market_data->can('base_index'))
+        ? $market_data->base_index : 0;
     my $data = $market_data->get_slice(0, $market_data->last_index());
-    my $n = scalar @$data;
-    return if $n < (2 * $self->{depth} + 1);
-
-    $self->{_detection_tf} = $market_data->get_timeframe();
-
-    $self->_calc_swings($data);
-    my $atr = $self->_calc_atr($data);
-    $self->_detect_levels($data, $atr);
-    $self->_run_state_machine($data);
-
-    # ── PDF 4.4: jerarquía multi-temporal y peso de volumen ──────────────────
-    $self->_calc_mtf_volume($market_data, $data);
-    $self->_classify_origin();
+    return if @$data < 7;
+    my $tf = $market_data->get_timeframe();
+    my $smc = Market::Algorithms::MainSMC->compute(
+        candles => $data, max_visible_index => $#$data, timeframe => $tf,
+        config => { internalStructureSensitivity => 3, externalStructureSensitivity => 25 },
+    );
+    my $result = Market::Algorithms::MainLiquidity->compute(
+        candles => $data, max_visible_index => $#$data, timeframe => $tf,
+        structure_pivots => $smc->{pivots}, show_internal_liquidity => 1,
+    );
+    my %event = map { ($_->{level_id} // '') => $_ } @{ $result->{events} // [] };
+    for my $lv (@{ $result->{levels} // [] }) {
+        my $ev = $event{$lv->{id}};
+        my $class = $ev ? lc($ev->{classification} // '') : '';
+        $class = ucfirst($class) if $class ne '';
+        my $mapped = {
+            id => $lv->{id}, kind => $lv->{type}, price => $lv->{base_price} // $lv->{price},
+            index => $lv->{start_index}, pair_index => $lv->{first_pivot_index},
+            origin => ($lv->{internal_or_external} // '') eq 'external' ? 'external' : 'internal',
+            state => $ev ? 'Resolved' : 'Detected', classification => $class || undef,
+            swept_at => $ev ? $ev->{swept_index} : undef,
+            resolved_at => $ev ? $ev->{resolved_index} : undef,
+            volume_mtf => { 1 => 0, 5 => 0, 15 => 0 },
+        };
+        push @{ $self->{levels} }, $mapped;
+    }
+    $self->{events} = [ @{ $result->{events} // [] } ];
+    $self->_offset_indices($base) if $base;
 }
 # ─────────────────────────────────────────────────────────────────────────────
 # calculate_replay — versión para el sistema Replay
@@ -234,42 +257,7 @@ sub calculate_all {
 # ─────────────────────────────────────────────────────────────────────────────
 sub calculate_replay {
     my ($self, $market_data) = @_;
-    $self->reset();
-
-    my $data = $market_data->get_slice(0, $market_data->last_index());
-    my $n = scalar @$data;
-    return if $n < (2 * $self->{depth} + 1);
-
-    $self->{_detection_tf} = $market_data->get_timeframe();
-
-    my $base = (ref($market_data) && $market_data->can('base_index'))
-             ? $market_data->base_index : 0;
-    my $warmup_n = 0;
-    my $run_data = $data;
-    if ($base > 0 && $market_data->can('get_warmup_slice')) {
-        my $WARMUP = $self->{warmup_candles} // 500;
-        my $wu = $market_data->get_warmup_slice($WARMUP);
-        if ($wu && @$wu) {
-            $warmup_n = scalar @$wu;
-            $run_data = [ @$wu, @$data ];
-        }
-    }
-
-    $self->_calc_swings($run_data);
-    my $atr = $self->_calc_atr($run_data);
-
-    # BSL, SSL, EQH y EQL — completo, ya no hace falta la versión "fast".
-    $self->_detect_levels($run_data, $atr);
-    $self->_run_state_machine($run_data);
-    # Omitimos _calc_mtf_volume (no afecta el render del Replay)
-
-    # Recortar el warm-up: descartar niveles detectados enteramente antes
-    # de la ventana real y reindexar de vuelta al espacio local de la
-    # ventana (mismo patrón que SMC_Structures::_trim_warmup).
-    $self->_trim_warmup($warmup_n) if $warmup_n;
-
-    # Windowing (Market::WindowProxy): índices locales -> globales.
-    $self->_offset_indices($base) if $base;
+    $self->_calculate_main_algorithms($market_data);
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -583,6 +571,47 @@ sub _classify_origin {
     return;
 }
 
+# Proyecta swings de cada TF superior sobre el índice del TF activo. Se evita
+# crear otro indicador recursivo: basta la definición formal de swing k=depth.
+sub _add_external_levels {
+    my ($self, $market_data, $active, $atr) = @_;
+    return unless $market_data && $active && @$active;
+    my @order = (1, 5, 15, 60, 120, 240, 'D', 'W');
+    my $cur = $self->{_detection_tf};
+    my %rank; @rank{@order} = (0 .. $#order);
+    return unless exists $rank{$cur};
+    my $k = $self->{depth} // 3;
+    my %seen = map { join('|', $_->{kind}, sprintf('%.8f', $_->{price}), $_->{index}) => 1 }
+               @{ $self->{levels} };
+
+    for my $pos ($rank{$cur} + 1 .. $#order) {
+        my $tf = $order[$pos];
+        my $h = $market_data->get_tf_data($tf) || [];
+        next if @$h < 2 * $k + 1;
+        for my $i ($k .. $#$h - $k) {
+            my ($hi, $lo) = (1, 1);
+            for my $j ($i-$k .. $i+$k) {
+                next if $j == $i;
+                $hi = 0 if $h->[$j]{high} >= $h->[$i]{high};
+                $lo = 0 if $h->[$j]{low}  <= $h->[$i]{low};
+            }
+            next unless $hi || $lo;
+            my $epoch = $h->[$i]{epoch};
+            my ($a,$b)=(0,$#$active);
+            while ($a < $b) { my $m=int(($a+$b+1)/2); $active->[$m]{epoch} <= $epoch ? ($a=$m) : ($b=$m-1); }
+            for my $spec ($hi ? ['BSL',$h->[$i]{high}] : (), $lo ? ['SSL',$h->[$i]{low}] : ()) {
+                my ($kind,$price)=@$spec;
+                my $key=join('|',$kind,sprintf('%.8f',$price),$a);
+                next if $seen{$key}++;
+                $self->_push_level($a,$price,$kind,undef);
+                my $lv=$self->{levels}[-1];
+                $lv->{origin}='external'; $lv->{origin_tf}=$tf;
+            }
+        }
+    }
+    @{ $self->{levels} } = sort { $a->{index} <=> $b->{index} } @{ $self->{levels} };
+}
+
 # Marca como 'external' los niveles de ESTE indicador (calculado en su TF
 # activo) cuyo precio coincide, dentro de tolerancia ATR*factor, con algún
 # nivel de un Liquidity calculado en un TF superior ($htf_liquidity).
@@ -729,8 +758,10 @@ sub _run_state_machine {
         if (defined $reclaim_at) {
             my $candles_to_reclaim = $reclaim_at - $swept_at;
             $level->{state} = 'Reclaimed';
-            $level->{classification} =
-                ($candles_to_reclaim <= $grab_max) ? 'Grab' : 'Sweep';
+            # Definición formal: mecha que cruza y cierra dentro en la misma
+            # vela es Sweep. Grab es el rechazo rápido posterior (1..3 velas).
+            $level->{classification} = $candles_to_reclaim == 0 ? 'Sweep'
+                : ($candles_to_reclaim <= $grab_max ? 'Grab' : 'Sweep');
             $level->{resolved_at} = $reclaim_at;
             $level->{state} = 'Resolved';
         }

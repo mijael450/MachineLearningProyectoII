@@ -65,6 +65,7 @@ sub load_csv_files {
     # Vaciar datos previos de 1m para evitar duplicados
     $self->{data}{1} = [];
 
+    my %by_epoch;
     for my $file (@files) {
         next unless defined $file && -f $file;
         print "  Cargando: $file\n";
@@ -76,7 +77,8 @@ sub load_csv_files {
             my ($time, $open, $high, $low, $close, $volume) = split /,/, $line;
             $time =~ s/\.\d+//;
             my $epoch = _to_epoch($time);
-            $self->add_candle({
+            # La última fuente gana si dos CSV contienen el mismo minuto.
+            $by_epoch{$epoch} = {
                 time   => $time,
                 epoch  => $epoch,
                 open   => $open   + 0,
@@ -84,14 +86,13 @@ sub load_csv_files {
                 low    => $low    + 0,
                 close  => $close  + 0,
                 volume => $volume + 0,
-            });
+            };
         }
         close $fh;
     }
 
-    # Ordenar por epoch por si los archivos no llegaron en orden
-    my $arr = $self->{data}{1};
-    @$arr = sort { $a->{epoch} <=> $b->{epoch} } @$arr;
+    # Ordenar y materializar una sola vela por timestamp.
+    $self->{data}{1} = [ map { $by_epoch{$_} } sort { $a <=> $b } keys %by_epoch ];
 
     $self->build_timeframes();
     return $self;
@@ -226,6 +227,7 @@ sub _bsearch_epoch_le {
         my $mid = int(($lo + $hi + 1) / 2);
         $arr->[$mid]{epoch} > $target ? ($hi = $mid - 1) : ($lo = $mid);
     }
+
     return $lo;
 }
 

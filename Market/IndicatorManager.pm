@@ -1,6 +1,7 @@
 package Market::IndicatorManager;
 use strict;
 use warnings;
+use Market::ReplayProxy;
 
 sub new {
     my ($class) = @_;
@@ -16,9 +17,26 @@ sub register {
 
 sub update_last {
     my ($self, $market_data) = @_;
-    for my $name (keys %{$self->{indicators}}) {
-        $self->{indicators}{$name}->calculate_all($market_data);
+    # Orden determinista: los módulos compuestos consumen resultados previos.
+    my @order = qw(ATR SMC_Structures Liquidity ZigZagMTF ZigZagVolume);
+    my %done;
+    # Los indicadores de estructura son costosos y el PDF limita su cálculo a
+    # velas visibles + contexto. En datasets grandes analizamos las últimas
+    # 4,000 velas; WindowProxy mantiene índices globales y acceso MTF seguro.
+    my $analysis_data = $market_data;
+    if (!$market_data->can('base_index') && $market_data->size > 6000) {
+        $analysis_data = Market::WindowProxy->new(
+            $market_data, $market_data->last_index, 4000,
+        );
     }
+    for my $name (@order, sort keys %{$self->{indicators}}) {
+        next if $done{$name}++;
+        next unless $self->{indicators}{$name};
+        my $source = $name eq 'ATR' ? $market_data : $analysis_data;
+        $self->{indicators}{$name}->calculate_all($source);
+    }
+    my $smc=$self->{indicators}{SMC_Structures}; my $liq=$self->{indicators}{Liquidity};
+    $smc->apply_liquidity_context($liq) if $smc && $liq && $smc->can('apply_liquidity_context');
 }
 
 sub get {

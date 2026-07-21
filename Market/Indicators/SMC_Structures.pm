@@ -1,6 +1,7 @@
 package Market::Indicators::SMC_Structures;
 use strict;
 use warnings;
+use Market::Algorithms::MainSMC;
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Market::Indicators::SMC_Structures
@@ -186,6 +187,7 @@ sub _offset_indices {
         if ($dx != 0) {
             $tl->{slope}     = ($p2->{price} - $p1->{price}) / $dx;
             $tl->{intercept} = $p1->{price} - $tl->{slope} * $p1->{index};
+            $tl->{parallel_intercept} = $tl->{intercept} + ($tl->{parallel_offset} // 0);
         }
     }
     for my $fib (@{ $self->{fibonacci} }) {
@@ -490,25 +492,68 @@ sub calculate_all {
     # una vecindad mucho más ancha, produciendo ~10x menos puntos — la base
     # real de las etiquetas HH/HL/LH/LL "limpias", BOS/CHoCH externo, Order
     # Blocks, Trendlines y Fibonacci.
-    my @zz_internal = @{ $self->_detect_swings_at_depth($run_data, $rn, $k) };
-    $self->_label_and_store_swings(\@zz_internal, $self->{swings}, $self->{swings_by_index});
+    my $main_atr = $self->_calc_atr_simple($run_data, 14);
+    my $main = Market::Algorithms::MainSMC->compute(
+        candles => $run_data,
+        atr_series => $main_atr,
+        max_visible_index => $rn - 1,
+        timeframe => $market_data->get_timeframe(),
+        config => {
+            internalStructureSensitivity => 3,
+            externalStructureSensitivity => 25,
+            fvgMinSizeAtrMultiplier => 0.50,
+        },
+    );
 
-    my $mk = $self->{major_depth};
-    if ($rn >= (2 * $mk + 1)) {
-        my @zz_major = @{ $self->_detect_swings_at_depth($run_data, $rn, $mk) };
-        $self->_label_and_store_swings(\@zz_major, $self->{major_swings}, $self->{major_swings_by_index});
+    for my $p (@{ $main->{pivots} // [] }) {
+        my $sw = {
+            index => $p->{index}, price => $p->{price}, kind => $p->{kind}, type => $p->{kind},
+            label => $p->{label}, scope => $p->{scope},
+            confirmed_at => $p->{confirmed_at},
+        };
+        if (($p->{scope} // '') eq 'external') {
+            push @{ $self->{major_swings} }, $sw;
+            $self->{major_swings_by_index}{$sw->{index}} = $sw;
+        } else {
+            push @{ $self->{swings} }, $sw;
+            $self->{swings_by_index}{$sw->{index}} = $sw;
+        }
     }
 
     # ── Paso 3: detección de BOS y CHoCH (sobre $run_data: el estado de
     #    tendencia interno/externo también hereda contexto del warm-up).
     #    Internal usa {swings} (k=5), external usa {major_swings} (k=50) —
     #    dos pasadas independientes, cada una con su propio pivote/tendencia.
-    $self->_detect_bos_choch($run_data);
+    for my $ev (@{ $main->{structures} // [] }) {
+        next unless $ev->{type} eq 'BOS' || $ev->{type} eq 'CHOCH';
+        my $mapped = {
+            index => $ev->{break_index},
+            level_index => $ev->{pivot_index},
+            price => $ev->{break_price}, level_price => $ev->{break_price},
+            type => $ev->{type} eq 'CHOCH' ? 'CHoCH' : 'BOS',
+            direction => $ev->{direction} eq 'bullish' ? 'up' : 'down',
+            scope => $ev->{scope},
+            probability_weight => $ev->{quality_score},
+        };
+        push @{ $self->{events} }, $mapped;
+    }
 
     # ── Paso 4: Fair Value Gaps — INCREMENTAL (spec del profesor: "no debe
     #    recalcular todo el historial... únicamente debe analizar la nueva
     #    vela cerrada"). Ver _sync_fvg() para el detalle del mecanismo.
-    $self->_sync_fvg($market_data, $run_data, $warmup_n, $base);
+    for my $f (@{ $main->{fvgs} // [] }) {
+        my $mapped = {
+            index => $f->{formed_index},
+            direction => $f->{direction} eq 'bullish' ? 'up' : 'down',
+            top => $f->{gap_high}, bottom => $f->{gap_low},
+            orig_top => $f->{gap_high}, orig_bottom => $f->{gap_low},
+            state => $f->{status} eq 'active' ? 'active' : 'mitigated',
+            mitigated_at => $f->{status} eq 'active' ? undef : $f->{project_until_index},
+            high_reaction => $f->{reaction_zone} ? 1 : 0,
+        };
+        push @{ $self->{fvgs} }, $mapped;
+        $self->{fvgs_by_index}{$mapped->{index}} = $mapped;
+    }
 
     # ── Paso 5: Order Blocks (última vela opuesta antes de cada BOS externo) ─
     $self->_detect_order_blocks($run_data);
@@ -540,11 +585,12 @@ sub calculate_all {
     @{ $self->{trendlines} } = sort { $a->{point1}{index} <=> $b->{point1}{index} }
                                 @{ $self->{trendlines} };
 
-    # Índice de buckets para FVG y OB (O(1) lookup en draw)
-    $self->_build_bucket_index();
-
     # Windowing (Market::WindowProxy): convertir índices locales -> globales.
     $self->_offset_indices($base) if $base;
+
+    # Construir el índice después de convertir a coordenadas globales; de lo
+    # contrario el overlay consulta buckets distintos a los almacenados.
+    $self->_build_bucket_index();
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1101,7 +1147,6 @@ sub _detect_order_blocks {
 
     for my $ev (@{ $self->{events} }) {
         next unless $ev->{type} eq 'BOS';
-        next unless $ev->{scope} eq 'external';   # FIX: solo estructura externa
 
         my $is_bullish_bos = ($ev->{direction} eq 'up');
         my $search_start    = $ev->{level_index};
@@ -1125,6 +1170,7 @@ sub _detect_order_blocks {
         my $ob_candle = $data->[$ob_index];
         my $ob = {
             index        => $ob_index,
+            scope        => $ev->{scope},
             direction    => $is_bullish_bos ? 'bullish' : 'bearish',
             top          => $ob_candle->{high},
             bottom       => $ob_candle->{low},
@@ -1132,16 +1178,23 @@ sub _detect_order_blocks {
             mitigated_at => undef,
         };
 
-        # Buscar mitigación: primera vela posterior al BOS que vuelve a
-        # tocar el rango del Order Block.
+        # Mantener el bloque activo mientras el precio solo lo pruebe con una
+        # mecha. Se invalida cuando un cierre atraviesa su extremo opuesto,
+        # como los Order Blocks proyectados de TradingView.
         for (my $j = $ev->{index} + 1; $j < $n; $j++) {
             my $c = $data->[$j];
-            if ($c->{low} <= $ob->{top} && $c->{high} >= $ob->{bottom}) {
+            my $invalidated = $ob->{direction} eq 'bullish'
+                ? ($c->{close} < $ob->{bottom})
+                : ($c->{close} > $ob->{top});
+            if ($invalidated) {
                 $ob->{mitigated_at} = $j;
                 last;
             }
         }
 
+        # Los internos se conservan únicamente mientras estén activos. Así se
+        # muestran los bloques recientes proyectados sin llenar el historial.
+        next if $ev->{scope} eq 'internal' && defined $ob->{mitigated_at};
         push @{ $self->{order_blocks} }, $ob;
         $self->{order_blocks_by_index}{$ob_index} = $ob;
     }
@@ -1237,6 +1290,8 @@ sub _detect_trendlines {
 
     for my $type ('high', 'low') {
         my @pivots = grep { $_->{type} eq $type } @{ $self->{major_swings} };
+        my $opposite_type = $type eq 'high' ? 'low' : 'high';
+        my @opposite = grep { $_->{type} eq $opposite_type } @{ $self->{major_swings} };
         next if @pivots < 2;
 
         for (my $i = 0; $i < $#pivots; $i++) {
@@ -1249,12 +1304,30 @@ sub _detect_trendlines {
             my $slope     = ($p2->{price} - $p1->{price}) / $dx;
             my $intercept = $p1->{price} - $slope * $p1->{index};
 
+            # Algoritmo de ML_Project-main: buscar el pivote opuesto más
+            # alejado en el lado válido y usar su offset como paralela.
+            my ($best_offset, $best_abs);
+            for my $p (@opposite) {
+                next if $p->{index} < $p1->{index};
+                my $line_price = $slope * $p->{index} + $intercept;
+                my $offset = $p->{price} - $line_price;
+                next if $type eq 'low'  && $offset < 0;
+                next if $type eq 'high' && $offset > 0;
+                if (!defined($best_abs) || abs($offset) > $best_abs) {
+                    $best_abs = abs($offset);
+                    $best_offset = $offset;
+                }
+            }
+            next unless defined($best_offset) && $best_abs > 0;
+
             push @{ $self->{trendlines} }, {
                 kind      => ($type eq 'high') ? 'resistance' : 'support',
                 point1    => { index => $p1->{index}, price => $p1->{price} },
                 point2    => { index => $p2->{index}, price => $p2->{price} },
                 slope     => $slope,
                 intercept => $intercept,
+                parallel_offset => $best_offset,
+                parallel_intercept => $intercept + $best_offset,
             };
         }
     }
@@ -1564,6 +1637,53 @@ sub active_fvgs_at {
             && (!defined $_->{mitigated_at} || $_->{mitigated_at} > $index)
         } @{ $self->{fvgs} }
     ];
+}
+
+sub latest_channel_before {
+    my ($self, $end, $start) = @_;
+    my @valid = grep {
+        $_->{point2}{index} <= $end
+        && $_->{point1}{index} <= $end
+        && (!defined($start) || $_->{point2}{index} >= $start)
+    } @{ $self->{trendlines} };
+    return undef unless @valid;
+    @valid = sort { $b->{point2}{index} <=> $a->{point2}{index} } @valid;
+    return $valid[0];
+}
+
+# Vista limpia tipo TradingView: conservar solo los N FVG más recientes de
+# cada dirección dentro del rango solicitado.
+sub recent_fvgs_in_range {
+    my ($self, $start, $end, $limit) = @_;
+    $limit //= 3;
+    my @sorted = sort { $b->{index} <=> $a->{index} }
+                 @{ $self->fvgs_in_range($start, $end) };
+    my %count;
+    my @selected = grep { $count{$_->{direction}}++ < $limit } @sorted;
+    return [ sort { $a->{index} <=> $b->{index} } @selected ];
+}
+
+# Sección 5: concurre liquidez resuelta con estructura y FVG.
+sub apply_liquidity_context {
+    my ($self,$liq)=@_; return unless $liq;
+    my $levels=$liq->values || [];
+    for my $lv (@$levels) {
+        next unless ($lv->{state}//'') eq 'Resolved';
+        my $at=$lv->{resolved_at}//$lv->{swept_at}; next unless defined $at;
+        my $class=$lv->{classification}//'';
+        $lv->{reversal_alert}=1 if $class eq 'Grab';
+        for my $ev (@{$self->{events}}) {
+            next if $ev->{index} < $at;
+            if ($class eq 'Sweep' && $ev->{type} eq 'CHoCH') { $ev->{probability_weight}=3; $ev->{liquidity_source}='Sweep'; last }
+            if ($class eq 'Run'   && $ev->{type} eq 'BOS')   { $ev->{probability_weight}=2; $ev->{liquidity_source}='Run'; last }
+        }
+        if ($class eq 'Sweep' || $class eq 'Grab') {
+            for my $f (@{$self->{fvgs}}) {
+                next unless $f->{index} >= ($lv->{swept_at}//$at) && $f->{index} <= $at+1;
+                $f->{high_reaction}=1; $f->{liquidity_source}=$class;
+            }
+        }
+    }
 }
 
 # Order Blocks dentro de un rango — su "vida visual" intersecta [start,end]

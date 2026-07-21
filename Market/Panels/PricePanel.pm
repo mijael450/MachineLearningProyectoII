@@ -25,6 +25,10 @@ sub draw {
         $max = $state->{price_max};
     } else {
         ($min, $max) = _range_price($data);
+        $min = $state->{overlay_price_min}
+            if defined($state->{overlay_price_min}) && $state->{overlay_price_min} < $min;
+        $max = $state->{overlay_price_max}
+            if defined($state->{overlay_price_max}) && $state->{overlay_price_max} > $max;
         my $pad = ($max - $min) * 0.08 || 1;
         $min -= $pad;
         $max += $pad;

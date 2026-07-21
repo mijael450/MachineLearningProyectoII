@@ -14,6 +14,8 @@ use Market::Overlays::Liquidity;
 use Market::Indicators::ZigZagMTF;
 use Market::Indicators::ZigZagVolume;
 use Market::Overlays::ZigZag;
+use Market::Indicators::VolumeProfile;
+use Market::Overlays::VolumeProfile;
 
 sub new {
     my ($class, %args) = @_;
@@ -38,6 +40,8 @@ sub new {
         smc_overlay => Market::Overlays::SMC_Structures->new(),
         liq_overlay => Market::Overlays::Liquidity->new(),
         zz_overlay  => Market::Overlays::ZigZag->new(),
+        vp_overlay  => Market::Overlays::VolumeProfile->new(),
+        vp_visible  => 0,
 
         # ── Estado del sistema Replay (Fase 2) ───────────────────────────────
         # replay_mode   : 0 = normal, 1 = en modo replay activo
@@ -52,6 +56,7 @@ sub new {
         replay_cursor        => 0,
         replay_speed         => 200,
         replay_timer         => undef,
+        replay_playing       => 0,
         replay_saved_first   => undef,
         replay_saved_visible => undef,
         replay_free_view     => 0,     # 1 = usuario hizo zoom/scroll libre en replay
@@ -217,21 +222,26 @@ sub run {
 
     # ── Variables de estado para overlays ─────────────────────────────────────
     my %smc_var = (
-        swings => 0, bos => 0, choch => 0, fvg => 0, fib => 0,
-        ob => 0, sr => 0, trend => 0,
+        swings => 0, bos_internal => 0, bos_external => 0,
+        choch_internal => 0, choch_external => 0, fvg => 0, fib => 0,
+        ob_internal => 0, ob_external => 0, sr => 0, trend => 0,
     );
     my $smc_master = 0;
+    my $vp_var = 0;
     my %smc_menu_label = (
         swings => 'Estructura (HH/HL/LH/LL)',
-        bos    => 'BOS',
-        choch  => 'CHoCH',
+        bos_internal => 'BOS interno',
+        bos_external => 'BOS externo',
+        choch_internal => 'CHoCH interno',
+        choch_external => 'CHoCH externo',
         fvg    => 'FVG',
         fib    => 'Fibonacci',
-        ob     => 'Order Blocks',
+        ob_internal => 'Order Blocks internos',
+        ob_external => 'Order Blocks externos (Swing)',
         sr     => 'Support / Resistance',
         trend  => 'Trendlines / Channels',
     );
-    my @smc_order = qw(swings bos choch fvg fib ob sr trend);
+    my @smc_order = qw(swings bos_internal bos_external choch_internal choch_external fvg fib ob_internal ob_external sr trend);
     my $refresh_smc = sub {
         for my $k (@smc_order) { $self->{smc_overlay}->set_visible($k, $smc_var{$k}); }
         $self->draw();
@@ -476,13 +486,20 @@ sub run {
         $refresh_smc->();
     });
     $make_chk->($col_smc, $smc_menu_label{swings}, \$smc_var{swings}, $leaf_smc);
-    $make_chk->($col_smc, $smc_menu_label{bos},    \$smc_var{bos},    $leaf_smc);
-    $make_chk->($col_smc, $smc_menu_label{choch},  \$smc_var{choch},  $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{bos_internal}, \$smc_var{bos_internal}, $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{bos_external}, \$smc_var{bos_external}, $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{choch_internal}, \$smc_var{choch_internal}, $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{choch_external}, \$smc_var{choch_external}, $leaf_smc);
     $make_chk->($col_smc, $smc_menu_label{fvg},    \$smc_var{fvg},    $leaf_smc);
     $make_chk->($col_smc, $smc_menu_label{fib},    \$smc_var{fib},    $leaf_smc);
-    $make_chk->($col_smc, $smc_menu_label{ob},     \$smc_var{ob},     $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{ob_internal}, \$smc_var{ob_internal}, $leaf_smc);
+    $make_chk->($col_smc, $smc_menu_label{ob_external}, \$smc_var{ob_external}, $leaf_smc);
     $make_chk->($col_smc, $smc_menu_label{sr},     \$smc_var{sr},     $leaf_smc);
     $make_chk->($col_smc, $smc_menu_label{trend},  \$smc_var{trend},  $leaf_smc);
+    $make_chk->($col_smc, 'Volume Profile (rango visible)', \$vp_var, sub {
+        $self->{vp_visible} = $vp_var ? 1 : 0;
+        $self->draw();
+    });
 
     # ── Columna Liquidity ──────────────────────────────────────────────────
     my $col_liq = $make_col->('Liquidity', '#ef5350');
@@ -660,7 +677,7 @@ sub _replay_limit {
 # Devuelve 1 si el replay está activo y corriendo (Play), 0 si está pausado o inactivo.
 sub replay_running {
     my ($self) = @_;
-    return $self->{replay_mode} && defined $self->{replay_timer};
+    return $self->{replay_mode} && $self->{replay_playing};
 }
 
 
@@ -769,9 +786,9 @@ sub replay_enter_at {
         -background => '#2a1a00',
     ) if $self->{_replay_btn};
 
-    # Recalcular indicadores y posicionar vista
+    # Conservar la vista elegida: las siguientes velas ocuparán los espacios
+    # vacíos a la derecha, en vez de desplazar las anteriores.
     $self->_replay_recalc_indicators();
-    $self->_replay_center_view();
     $self->_replay_update_info();
     $self->draw();
 }
@@ -859,8 +876,8 @@ sub replay_go_start {
     $self->_replay_stop_timer();
     $self->_replay_update_play_btn(' > ');
     $self->{replay_cursor} = 0;
+    $self->{first} = 0;
     $self->_replay_recalc_indicators();
-    $self->_replay_center_view();
     $self->_replay_update_info();
     $self->draw();
 }
@@ -878,8 +895,11 @@ sub replay_toggle_play {
         $self->_replay_update_play_btn(' > ');
     } else {
         # Iniciar play
+        $self->{replay_playing} = 1;
         $self->_replay_update_play_btn('||');
-        $self->_replay_tick();
+        # Programar en vez de ejecutar dentro del clic: Tk actualiza el botón
+        # inmediatamente y un solo clic deja un estado inequívoco.
+        $self->{replay_timer} = $self->{mw}->after(1, sub { $self->_replay_tick() });
     }
 }
 
@@ -900,6 +920,9 @@ sub replay_fast_forward {
         return unless $self->{replay_mode};
         my $total = $self->{market}->last_index();
         if ($self->{replay_cursor} >= $total || $steps_left <= 0) {
+            # El callback actual ya terminó: no dejar un id obsoleto que haga
+            # creer a replay_running() que Fast Forward sigue ejecutándose.
+            $self->{replay_timer} = undef;
             $self->_replay_update_play_btn(' > ');
             return;
         }
@@ -920,13 +943,14 @@ sub replay_fast_forward {
 # Un "tick" del play automático: avanza 1 vela y programa el siguiente tick.
 sub _replay_tick {
     my ($self) = @_;
-    return unless $self->{replay_mode};
+    $self->{replay_timer} = undef; # el callback que nos trajo ya se consumió
+    return unless $self->{replay_mode} && $self->{replay_playing};
 
     my $total = $self->{market}->last_index();
 
     if ($self->{replay_cursor} >= $total) {
         # Llegamos al final — pausar automáticamente
-        $self->_replay_stop_timer();
+        $self->{replay_playing} = 0;
         $self->_replay_update_play_btn(' > ');
         return;
     }
@@ -938,15 +962,17 @@ sub _replay_tick {
     $self->draw();
 
     # Programar el siguiente tick
-    $self->{replay_timer} = $self->{mw}->after(
-        $self->{replay_speed},
-        sub { $self->_replay_tick() }
-    );
+    if ($self->{replay_playing}) {
+        $self->{replay_timer} = $self->{mw}->after(
+            $self->{replay_speed}, sub { $self->_replay_tick() }
+        );
+    }
 }
 
 # Detiene el timer de avance automático.
 sub _replay_stop_timer {
     my ($self) = @_;
+    $self->{replay_playing} = 0;
     if (defined $self->{replay_timer}) {
         eval { $self->{mw}->after('cancel', $self->{replay_timer}); };
         $self->{replay_timer} = undef;
@@ -969,7 +995,14 @@ sub _replay_recalc_indicators {
     #     produce resultados idénticos a 0..cursor en el rango visible, ~50x más
     #     rápido. Cumple el PDF: 'cálculos limitados a velas visibles + ventana
     #     de contexto', sin filtrar velas futuras (la ventana termina en cursor).
-    my $REPLAY_WINDOW = $self->{replay_window} // 4000;
+    # Contexto proporcional al zoom. 600 cubre holgadamente swings mayores,
+    # EQH/EQL y FVG sin bloquear Tk; se amplía solo al hacer zoom muy lejos.
+    my $REPLAY_WINDOW = $self->{replay_window};
+    if (!defined $REPLAY_WINDOW) {
+        $REPLAY_WINDOW = int(($self->{visible} || 160) * 3);
+        $REPLAY_WINDOW = 600  if $REPLAY_WINDOW < 600;
+        $REPLAY_WINDOW = 1200 if $REPLAY_WINDOW > 1200;
+    }
 
     my $ind = $self->{indicators};
     my $cursor = $self->{replay_cursor};
@@ -981,6 +1014,7 @@ sub _replay_recalc_indicators {
 
     my $liq = $ind->get_indicator('Liquidity');
     $liq->calculate_replay($wproxy) if defined $liq;
+    $smc->apply_liquidity_context($liq) if $smc && $liq && $smc->can('apply_liquidity_context');
 
     # ATR: intencionalmente NO se recalcula (ver comentario arriba).
 
@@ -994,38 +1028,22 @@ sub _replay_recalc_indicators {
     $zzv->calculate_all($wproxy) if defined $zzv;
 }
 
-# Centra la vista alrededor del replay_cursor manteniendo contexto histórico.
-# Muestra las últimas ~120 velas con el cursor en el 80% derecho de la pantalla.
+# Mantiene las posiciones mientras el cursor cabe en pantalla. Solo desplaza
+# la ventana cuando la nueva vela supera el borde derecho.
 sub _replay_center_view {
     my ($self) = @_;
     my $cursor = $self->{replay_cursor};
-
-    # ── Modo LIBRE: usuario hizo zoom/scroll durante el replay. ─────────────
-    # No forzar vista. Solo recentrar si el cursor sale del área visible,
-    # igual que TradingView en modo replay.
-    if ($self->{replay_free_view}) {
-        my $start = int($self->{first});
-        my $end   = $start + $self->{visible} - 1;
-        if ($cursor < $start || $cursor > $end) {
-            # Cursor salió de pantalla: recentrar sin cambiar zoom ni escala
-            $self->{first} = $cursor - int($self->{visible} * 0.80);
-            $self->limit_first();
-            if ($self->{auto_y}) {
-                delete $self->{price_min}; delete $self->{price_max};
-            }
-            if ($self->{auto_atr}) {
-                delete $self->{atr_min};   delete $self->{atr_max};
-            }
-        }
-        return;
+    my $start = int($self->{first});
+    my $end   = $start + $self->{visible} - 1;
+    my $changed = 0;
+    if ($cursor > $end) {
+        $self->{first} += $cursor - $end;
+        $changed = 1;
+    } elsif ($cursor < $start) {
+        $self->{first} = $cursor;
+        $changed = 1;
     }
-
-    # ── Modo NORMAL: centrar la vista en el cursor. ──────────────────────────
-    my $visible = $self->{visible};
-    $visible = 120 if $visible > 300;
-    $self->{visible} = $visible;
-    $self->{first}   = $cursor - int($visible * 0.80);
-    $self->limit_first();
+    return unless $changed;
     if ($self->{auto_y}) {
         delete $self->{price_min}; delete $self->{price_max};
     }
@@ -1257,10 +1275,47 @@ sub draw {
         last_candle => $self->{market}->last_candle(),
     );
 
+    # Los Order Blocks activos también participan del autoescalado para que
+    # las zonas proyectadas por encima/debajo del precio no queden recortadas.
+    my $smc_ind = $self->{indicators}->get_indicator('SMC_Structures');
+    if (defined $smc_ind && ($self->{smc_overlay}->is_visible('ob_internal')
+                          || $self->{smc_overlay}->is_visible('ob_external'))) {
+        my $obs = $smc_ind->order_blocks_in_range($start, $end);
+        for my $ob (@$obs) {
+            next if defined $ob->{mitigated_at};
+            next if ($ob->{scope} // 'external') eq 'internal'
+                 && !$self->{smc_overlay}->is_visible('ob_internal');
+            next if ($ob->{scope} // 'external') eq 'external'
+                 && !$self->{smc_overlay}->is_visible('ob_external');
+            $state{overlay_price_min} = $ob->{bottom}
+                if !defined($state{overlay_price_min}) || $ob->{bottom} < $state{overlay_price_min};
+            $state{overlay_price_max} = $ob->{top}
+                if !defined($state{overlay_price_max}) || $ob->{top} > $state{overlay_price_max};
+        }
+    }
+    if (defined $smc_ind && $self->{smc_overlay}->is_visible('fvg')) {
+        my $fvgs = $smc_ind->recent_fvgs_in_range($start, $end, 3);
+        for my $fvg (@$fvgs) {
+            next if defined $fvg->{mitigated_at};
+            $state{overlay_price_min} = $fvg->{bottom}
+                if !defined($state{overlay_price_min}) || $fvg->{bottom} < $state{overlay_price_min};
+            $state{overlay_price_max} = $fvg->{top}
+                if !defined($state{overlay_price_max}) || $fvg->{top} > $state{overlay_price_max};
+        }
+    }
+
     $self->draw_time_axis($start, $end, $x_of, $right, $h);
     $self->{price_panel}->draw($c, $data, $x_of, \%state);
     $self->{price_min} = $state{price_min};
     $self->{price_max} = $state{price_max};
+
+    if ($self->{vp_visible} && @$data) {
+        my $profile = Market::Indicators::VolumeProfile::compute_profile(
+            $data, row_size => 80, value_area_pct => 70,
+            tick_size => 0.25, volume_mode => 'updown',
+        );
+        $self->{vp_overlay}->draw_result($c, $profile, $x_of, \%state);
+    }
 
     # ── 3.5: Overlays SMC y Liquidez ──────────────────────────────────────────
     # Se dibujan DESPUÉS de las velas (para quedar encima) y ANTES del ATR
@@ -1272,7 +1327,6 @@ sub draw {
     # acotados por _replay_limit() (ver arriba: "$last = $self->_replay_limit()"),
     # así que los overlays automáticamente dejan de dibujar más allá del
     # cursor sin necesitar saber nada sobre el modo Replay.
-    my $smc_ind = $self->{indicators}->get_indicator('SMC_Structures');
     $self->{smc_overlay}->draw($c, $smc_ind, $x_of, \%state) if defined $smc_ind;
 
     my $liq_ind = $self->{indicators}->get_indicator('Liquidity');

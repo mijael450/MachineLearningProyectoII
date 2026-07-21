@@ -71,11 +71,14 @@ sub new {
         # mejora significativamente el tiempo de arranque y el draw().
         visible => {
             swings => 0,
-            bos    => 0,
-            choch  => 0,
+            bos_internal => 0,
+            bos_external => 0,
+            choch_internal => 0,
+            choch_external => 0,
             fvg    => 0,
             fib    => 0,
-            ob     => 0,   # Order Blocks
+            ob_internal => 0,
+            ob_external => 0,
             sr     => 0,   # Support / Resistance
             trend  => 0,   # Trendlines / Channels
             daily  => 0,   # Near daily candle's body & wick (Fase 4)
@@ -123,13 +126,16 @@ sub draw {
         if $self->{visible}{swings};
 
     $self->_draw_events($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h)
-        if $self->{visible}{bos} || $self->{visible}{choch};
+        if $self->{visible}{bos_internal} || $self->{visible}{bos_external}
+        || $self->{visible}{choch_internal} || $self->{visible}{choch_external};
 
     $self->_draw_fibonacci($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h)
         if $self->{visible}{fib};
 
-    $self->_draw_order_blocks($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h)
-        if $self->{visible}{ob};
+    $self->_draw_order_blocks($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h, 'internal')
+        if $self->{visible}{ob_internal};
+    $self->_draw_order_blocks($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h, 'external')
+        if $self->{visible}{ob_external};
 
     $self->_draw_support_resistance($canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h)
         if $self->{visible}{sr};
@@ -233,8 +239,9 @@ sub _draw_events {
 
         # Filtrar por visibilidad
         @evs = grep {
-            ($_->{type} eq 'BOS'   && $self->{visible}{bos})   ||
-            ($_->{type} eq 'CHoCH' && $self->{visible}{choch})
+            my $scope = ($_->{scope} // 'internal') eq 'external' ? 'external' : 'internal';
+            ($_->{type} eq 'BOS'   && $self->{visible}{"bos_$scope"}) ||
+            ($_->{type} eq 'CHoCH' && $self->{visible}{"choch_$scope"})
         } @evs;
         next unless @evs;
 
@@ -425,7 +432,7 @@ sub _draw_fvgs {
     my ($self, $canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h) = @_;
     my $on_mitigate = $self->{fvg_on_mitigate} // 'hide';
 
-    for my $fvg (@{ $smc->fvgs_in_range($start, $end) }) {
+    for my $fvg (@{ $smc->recent_fvgs_in_range($start, $end, 3) }) {
         my $is_mitigated = defined $fvg->{mitigated_at};
 
         next if $is_mitigated && $on_mitigate eq 'hide';   # consumido -> desaparece
@@ -451,7 +458,9 @@ sub _draw_fvgs {
         next if $i2 < $i1;
 
         my $x1 = $x_of->($i1 - $start);
-        my $x2 = $x_of->($i2 - $start);
+        my $x2 = !$is_mitigated
+            ? ($state->{right} // $x_of->($i2 - $start))
+            : $x_of->($i2 - $start);
         my $y_top = $self->{scale}->price_to_y($fvg->{top},    $min, $max, $top, $h);
         my $y_bot = $self->{scale}->price_to_y($fvg->{bottom}, $min, $max, $top, $h);
         next if $y_bot < $top || $y_top > $top + $h;
@@ -464,6 +473,11 @@ sub _draw_fvgs {
             -outline => '',
             -tags    => 'smc_fvg',
         );
+        if ($fvg->{high_reaction}) {
+            $canvas->createText($x1 + 4, ($y_top+$y_bot)/2,
+                -anchor=>'w', -text=>'ZONA ALTA REACCION', -fill=>'#f59e0b',
+                -font=>['Arial',7,'bold'], -tags=>'smc_fvg');
+        }
     }
 }
 
@@ -532,16 +546,19 @@ sub _draw_fibonacci {
 }
 
 sub _draw_order_blocks {
-    my ($self, $canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h) = @_;
+    my ($self, $canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h, $scope) = @_;
 
     for my $ob (@{ $smc->order_blocks_in_range($start, $end) }) {
+        next if defined($scope) && ($ob->{scope} // 'external') ne $scope;
         my $i1 = $ob->{index};
         my $i2 = defined $ob->{mitigated_at} ? $ob->{mitigated_at} : $end;
         $i1 = $start if $i1 < $start;
         $i2 = $end   if $i2 > $end;
 
         my $x1 = $x_of->($i1 - $start);
-        my $x2 = $x_of->($i2 - $start);
+        my $x2 = defined $ob->{mitigated_at}
+            ? $x_of->($i2 - $start)
+            : ($state->{right} // $x_of->($i2 - $start));
         my $y_top = $self->{scale}->price_to_y($ob->{top},    $min, $max, $top, $h);
         my $y_bot = $self->{scale}->price_to_y($ob->{bottom}, $min, $max, $top, $h);
 
@@ -596,7 +613,8 @@ sub _draw_support_resistance {
             -width => 1,
             -tags  => 'smc_sr',
         );
-        $canvas->createText($x1 + 4, $y - 6,
+        # En Tk, Y crece hacia abajo: resistencia arriba, soporte debajo.
+        $canvas->createText($x1 + 4, $y + ($is_res ? -7 : 7),
             -anchor => 'w',
             -text   => $is_res ? 'R' : 'S',
             -fill   => $color,
@@ -626,14 +644,18 @@ sub _draw_support_resistance {
 sub _draw_trendlines {
     my ($self, $canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h) = @_;
 
-    for my $tl (@{ $smc->latest_trendlines_before($end, 2) }) {
+    my $tl = $smc->latest_channel_before($end, $start);
+    return unless $tl;
+    for my $which (qw(base parallel)) {
         my $i1 = $tl->{point1}{index};
         my $i2 = $end;                       # extender el canal hacia adelante
         next if $i1 > $end;                  # canal fuera de rango (no debería pasar)
         $i1 = $start if $i1 < $start;
 
-        my $p1 = $tl->{slope} * $i1 + $tl->{intercept};
-        my $p2 = $tl->{slope} * $i2 + $tl->{intercept};
+        my $line_intercept = $which eq 'parallel'
+            ? $tl->{parallel_intercept} : $tl->{intercept};
+        my $p1 = $tl->{slope} * $i1 + $line_intercept;
+        my $p2 = $tl->{slope} * $i2 + $line_intercept;
 
         my $x1 = $x_of->($i1 - $start);
         my $x2 = $x_of->($i2 - $start);
@@ -649,6 +671,9 @@ sub _draw_trendlines {
             -width => 1,
             -tags  => 'smc_trend',
         );
+        $canvas->createText($x2-4,$y2+(($tl->{kind} eq 'resistance')?-7:7),
+            -anchor=>'e',-text=>($tl->{kind} eq 'resistance'?'CHANNEL ABOVE':'CHANNEL BELOW'),
+            -fill=>$color,-font=>['Arial',7,'bold'],-tags=>'smc_trend');
     }
 }
 
