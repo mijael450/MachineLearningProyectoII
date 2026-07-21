@@ -524,6 +524,40 @@ sub run {
     $make_chk->($col_zz, $zz_menu_label{zzmtf},    \$zz_var{zzmtf},    $leaf_zz);
     $make_chk->($col_zz, $zz_menu_label{zzvolume}, \$zz_var{zzvolume}, $leaf_zz);
 
+    $col_zz->Label(-text => 'Interno - Resolución:', -background => $PANEL_BG,
+        -foreground => '#b2b5be', -font => ['Arial', 8])->pack(-anchor => 'w', -pady => [5, 1]);
+    my @zz_resolutions = (
+        [1,'1m'], [2,'2m'], [3,'3m'], [5,'5m'], [10,'10m'], [15,'15m'], [30,'30m'],
+        [45,'45m'], [60,'1h'], [120,'2h'], [180,'3h'], [240,'4h'], ['D','1D'], ['W','1S'],
+    );
+    my @zz_res_buttons;
+    for my $row (0, 1) {
+        my $line = $col_zz->Frame(-background => $PANEL_BG)->pack(-anchor => 'w');
+        for my $item (@zz_resolutions[$row * 7 .. $row * 7 + 6]) {
+            my ($resolution, $label) = @$item;
+            my $button = $line->Button(-text => $label, -padx => 3, -pady => 1,
+                -font => ['Arial', 7], -relief => 'flat', -borderwidth => 1,
+                -foreground => '#b2b5be', -background => '#1e293b',
+                -activeforeground => '#ffffff', -activebackground => '#2563a8');
+            $button->configure(-command => sub {
+                my $zz = $self->{indicators}->get_indicator('ZigZagMTF');
+                return unless $zz;
+                $zz->set_resolution($resolution);
+                if ($self->{replay_mode}) { $self->_replay_recalc_indicators(); }
+                else { $zz->calculate_all($self->{market}); }
+                for my $entry (@zz_res_buttons) {
+                    $entry->[0]->configure(-background => '#1e293b', -foreground => '#b2b5be');
+                }
+                $button->configure(-background => '#2563a8', -foreground => '#ffffff');
+                $self->draw();
+            });
+            $button->pack(-side => 'left', -padx => 1, -pady => 1);
+            push @zz_res_buttons, [$button, $resolution];
+            $button->configure(-background => '#2563a8', -foreground => '#ffffff')
+                if "$resolution" eq '30';
+        }
+    }
+
     my $canvas = $mw->Canvas(-background => '#131722', -highlightthickness => 0)->pack(-fill => 'both', -expand => 1);
 
     $canvas->configure(-cursor => 'crosshair');
@@ -1327,13 +1361,14 @@ sub draw {
     # acotados por _replay_limit() (ver arriba: "$last = $self->_replay_limit()"),
     # así que los overlays automáticamente dejan de dibujar más allá del
     # cursor sin necesitar saber nada sobre el modo Replay.
+    my $zzv_ind = $self->{indicators}->get_indicator('ZigZagVolume');
+    $self->{smc_overlay}->set_external_zigzag($zzv_ind);
     $self->{smc_overlay}->draw($c, $smc_ind, $x_of, \%state) if defined $smc_ind;
 
     my $liq_ind = $self->{indicators}->get_indicator('Liquidity');
     $self->{liq_overlay}->draw($c, $liq_ind, $x_of, \%state) if defined $liq_ind;
 
     my $zzm_ind = $self->{indicators}->get_indicator('ZigZagMTF');
-    my $zzv_ind = $self->{indicators}->get_indicator('ZigZagVolume');
     $self->{zz_overlay}->draw($c, $zzm_ind, $zzv_ind, $x_of, \%state);
 
     # Limpia el área del ATR para ocultar cualquier vela/volumen que se haya pasado.

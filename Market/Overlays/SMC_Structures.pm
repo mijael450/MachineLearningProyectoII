@@ -99,6 +99,8 @@ sub is_visible {
     return $self->{visible}{$key};
 }
 
+sub set_external_zigzag { $_[0]->{external_zigzag} = $_[1]; }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # draw — punto de entrada principal, llamado desde ChartEngine::draw()
 #
@@ -498,16 +500,20 @@ sub _fvg_fade_stipple {
 
 sub _draw_fibonacci {
     my ($self, $canvas, $smc, $x_of, $state, $start, $end, $min, $max, $top, $h) = @_;
-
-    # Decisión de diseño: mostrar solo la PIERNA MÁS RECIENTE que intersecta
-    # el rango visible (no todo el historial de piernas) — igual convención
-    # que las herramientas de Fibonacci automáticas de TradingView/LuxAlgo,
-    # para no saturar el canvas con decenas de retrocesos históricos.
-    # fibonacci_in_range() devuelve en orden cronológico (mismo orden que se
-    # generaron los swings), así que el último elemento es el más reciente.
-    my $legs = $smc->fibonacci_in_range($start, $end);
-    return unless @$legs;
-    my $leg = $legs->[-1];
+    my $zz = $self->{external_zigzag};
+    return unless $zz;
+    my $segment = $zz->latest_confirmed_segment_before($end);
+    return unless $segment;
+    my ($from, $to) = ($segment->{from}, $segment->{to});
+    my $range = $to->{price} - $from->{price};
+    my @ratios = (0, 0.236, 0.382, 0.5, 0.618, 0.786, 1);
+    my $leg = {
+        from => $from,
+        to => $to,
+        levels => [ map {
+            { ratio => $_, price => $to->{price} - $range * $_ }
+        } @ratios ],
+    };
 
     my $right = $state->{right} // $x_of->($end - $start);
     my $fi = $leg->{from}{index} < $start ? $start : $leg->{from}{index};

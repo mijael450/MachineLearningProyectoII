@@ -72,6 +72,8 @@ sub reset {
 }
 
 sub values { return $_[0]->{segments}; }   # contrato mínimo del IndicatorManager
+sub set_resolution { $_[0]->{resolution} = $_[1]; }
+sub resolution { return $_[0]->{resolution}; }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -104,11 +106,15 @@ sub calculate_all {
 
     # ── Paso 2: factor de reversión según resolution (PDF pág.4) ──────────
     # Mapeo lineal: resolution → factor.  15→2.5  30→3.0  60→5.0
-    my $res    = $self->{resolution};
-    my $factor = $res <= 15 ? 2.5
-               : $res <= 30 ? 3.0
-               : $res <= 60 ? 5.0
-               :              3.0 + ($res - 30) / 15;
+    my $res = $self->{resolution};
+    my %minutes = (D => 1440, W => 10080);
+    my $res_min = exists $minutes{$res} ? $minutes{$res} : 0 + $res;
+    my %factor_for = (
+        1 => 1.35, 2 => 1.55, 3 => 1.75, 5 => 1.95, 10 => 2.25,
+        15 => 2.5, 30 => 3.0, 45 => 4.0, 60 => 5.0, 120 => 6.0,
+        180 => 7.0, 240 => 8.0, 1440 => 12.0, 10080 => 16.0,
+    );
+    my $factor = $factor_for{$res_min} // 3.0;
 
     # ── Paso 3: ZigZag ATR-based sobre 1m ────────────────────────────────
     # Si estamos en WindowProxy, prepend un warm-up de velas previas para

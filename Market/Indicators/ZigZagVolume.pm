@@ -280,4 +280,11 @@ sub pivots_in_range {
 
 sub tentative_segment { return $_[0]->{tentative}; }
 
+sub latest_confirmed_segment_before {
+    my ($self, $end) = @_;
+    my @segments = grep { $_->{confirmed} && $_->{to}{index} <= $end }
+                   @{ $self->{segments} };
+    return @segments ? $segments[-1] : undef;
+}
+
 1;
